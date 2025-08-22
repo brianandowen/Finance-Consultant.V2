@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
 import { supabase } from "../db";
-import { formatTW, toUtcDayRangeFromLocal } from "../utils/time.js";
-import { fmtAmount } from "../utils/number.js";
+import { formatTW, toUtcDayRangeFromLocal } from "../utils/time";
+import { fmtAmount } from "../utils/number";
 
 const MAX_LIMIT = 50;
 

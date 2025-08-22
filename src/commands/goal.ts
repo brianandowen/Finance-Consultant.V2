@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { supabase } from "../db";
-import { dateOnlyTW } from "../utils/time.js";
+import { dateOnlyTW } from "../utils/time";
 
 export const goalCommand = {
   data: new SlashCommandBuilder()
