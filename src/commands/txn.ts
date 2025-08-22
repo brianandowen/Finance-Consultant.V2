@@ -11,8 +11,8 @@ import {
   DMChannel,
 } from "discord.js";
 import { supabase } from "../db";
-import { fmtAmount } from "../utils/number";
-import { formatTW, dateOnlyTW } from "../utils/time";
+import { fmtAmount } from "../utils/number.js";
+import { formatTW, dateOnlyTW } from "../utils/time.js";
 import {
   INCOME_CATS,
   EXPENSE_CATS,

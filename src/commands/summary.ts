@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
 import { supabase } from "../db";
-import { monthRangeUTC } from "../utils/time";
-import { fmtAmount } from "../utils/number";
+import { monthRangeUTC } from "../utils/time.js";
+import { fmtAmount } from "../utils/number.js";
 
 export const summaryCommand = {
   data: new SlashCommandBuilder()

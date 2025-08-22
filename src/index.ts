@@ -1,12 +1,12 @@
 import { Client, GatewayIntentBits, Collection } from "discord.js";
 import dotenv from "dotenv";
-import { pingCommand } from "./commands/ping";
-import { goalCommand } from "./commands/goal";
-import { txnCommand } from "./commands/txn";
-import { balanceCommand } from "./commands/balance";
-import { summaryCommand } from "./commands/summary";
-import { historyCommand } from "./commands/history";
-import { notifyCommand } from "./commands/notify";
+import { pingCommand } from "./commands/ping.js";
+import { goalCommand } from "./commands/goal.js";
+import { txnCommand } from "./commands/txn.js";
+import { balanceCommand } from "./commands/balance.js";
+import { summaryCommand } from "./commands/summary.js";
+import { historyCommand } from "./commands/history.js";
+import { notifyCommand } from "./commands/notify.js";
 
 dotenv.config();
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
