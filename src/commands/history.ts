@@ -1,96 +1,54 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
-import { supabase } from "../db";
-import { formatTW, toUtcDayRangeFromLocal } from "../utils/time";
+// src/commands/history.ts
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from "discord.js";
+import { query, ensureUser } from "../db";
 import { fmtAmount } from "../utils/number";
+import { formatTW } from "../utils/time";
 
-const MAX_LIMIT = 50;
+const MAX_LIMIT = 20 as const;
 
-export const historyCommand = {
+export default {
   data: new SlashCommandBuilder()
     .setName("history")
-    .setDescription("查詢歷史交易（可分頁與篩選）")
-    .addIntegerOption(o =>
-      o.setName("page").setDescription("第幾頁（預設 1）").setMinValue(1))
-    .addIntegerOption(o =>
-      o.setName("limit").setDescription(`每頁筆數（1-${MAX_LIMIT}，預設 10）`).setMinValue(1).setMaxValue(MAX_LIMIT))
-    .addStringOption(o =>
-      o.setName("type").setDescription("類型")
-        .addChoices(
-          { name: "全部", value: "all" },
-          { name: "收入", value: "income" },
-          { name: "支出", value: "expense" }
-        ))
-    .addStringOption(o =>
-      o.setName("category").setDescription("類別（精確比對）"))
-    .addStringOption(o =>
-      o.setName("from").setDescription("起日 YYYY-MM-DD（台灣時間）"))
-    .addStringOption(o =>
-      o.setName("to").setDescription("迄日 YYYY-MM-DD（台灣時間）"))
-    .addStringOption(o =>
-      o.setName("keyword").setDescription("備註關鍵字（含即可）")),
+    .setDescription("查看最近幾筆交易")
+    .addIntegerOption((o) =>
+      o.setName("limit").setDescription(`顯示筆數（1-${MAX_LIMIT}，預設 10）`).setMinValue(1).setMaxValue(MAX_LIMIT)
+    ),
 
   async execute(interaction: ChatInputCommandInteraction) {
+    // ✅ 第一行就 defer
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const userId = interaction.user.id;
-    const page  = interaction.options.getInteger("page") ?? 1;
-    const limit = Math.min(interaction.options.getInteger("limit") ?? 10, MAX_LIMIT);
-    const type  = interaction.options.getString("type") ?? "all";
-    const category = interaction.options.getString("category") ?? undefined;
-    const fromStr  = interaction.options.getString("from") ?? undefined;
-    const toStr    = interaction.options.getString("to") ?? undefined;
-    const keyword  = interaction.options.getString("keyword") ?? undefined;
+    await ensureUser(userId);
 
-    // 轉換日期（以台灣時區判斷一天範圍，再轉 UTC 查詢）
-    let fromISO: string | undefined;
-    let toISO: string | undefined;
-    if (fromStr) {
-      const r = toUtcDayRangeFromLocal(fromStr);
-      if (!r) return interaction.reply({ content: "❌ from 日期格式錯誤，請用 YYYY-MM-DD。", ephemeral: true });
-      fromISO = r.from!;
-    }
-    if (toStr) {
-      const r = toUtcDayRangeFromLocal(toStr);
-      if (!r) return interaction.reply({ content: "❌ to 日期格式錯誤，請用 YYYY-MM-DD。", ephemeral: true });
-      toISO = r.to!;
-    }
+    const limit = interaction.options.getInteger("limit") ?? 10;
 
-    // 基礎查詢
-    let q = supabase
-      .from("transactions")
-      .select("id, created_at, type, amount, category, note", { count: "exact" }) // 拿到總筆數以便頁碼/總頁數
-      .eq("user_id", userId);
-
-    if (type !== "all") q = q.eq("type", type);
-    if (category) q = q.eq("category", category);
-    if (keyword) q = q.ilike("note", `%${keyword}%`);
-    if (fromISO) q = q.gte("created_at", fromISO);
-    if (toISO)   q = q.lt("created_at", toISO);
-
-    // 分頁：OFFSET 方案（簡單好用）
-    const offset = (page - 1) * limit;
-    q = q.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
-
-    const { data: rows, error, count } = await q;
-    if (error) return interaction.reply({ content: "❌ 查詢失敗：" + error.message, ephemeral: true });
-    if (!rows || rows.length === 0) return interaction.reply({ content: "找不到符合條件的紀錄。", ephemeral: true });
-
-    // 輸出
-    const lines = rows.map(r =>
-      `${r.id.toString().padStart(4, " ")}. ${formatTW(r.created_at)}  ${r.type === "income" ? "收入" : "支出"}  $${fmtAmount(r.amount)}  ${r.category}${r.note ? `（${r.note}）` : ""}`
+    const rows = await query<{
+      ttype: "income" | "expense";
+      amount: string;
+      category: string;
+      note: string | null;
+      occurred_at: string;
+    }>(
+      `SELECT ttype, amount::BIGINT::TEXT AS amount, category, note, occurred_at
+         FROM transactions
+        WHERE user_id = $1
+        ORDER BY occurred_at DESC
+        LIMIT ${Math.min(MAX_LIMIT, Math.max(1, limit))}`,
+      [userId]
     );
 
-    const total = count ?? rows.length;
-    const totalPages = Math.max(1, Math.ceil(total / limit));
-    const header =
-      `📜 歷史紀錄  第 ${page}/${totalPages} 頁（共 ${total} 筆）\n` +
-      `條件：${type === "all" ? "全部" : type === "income" ? "收入" : "支出"}`
-      + (category ? `｜類別：${category}` : "")
-      + (fromStr ? `｜自：${fromStr}` : "")
-      + (toStr ? `｜至：${toStr}` : "")
-      + (keyword ? `｜關鍵字：${keyword}` : "");
+    if (!rows.rows.length) {
+      return interaction.editReply("（沒有交易紀錄）");
+    }
 
-    await interaction.reply({
-      content: header + "\n```\n" + lines.join("\n") + "\n```",
-      ephemeral: true   // 只給你看到，避免洗頻
+    const lines = rows.rows.map((t) => {
+      const sign = t.ttype === "income" ? "+" : "-";
+      return `${formatTW(t.occurred_at)}｜${t.ttype === "income" ? "收入" : "支出"}｜${t.category}｜${sign}$${fmtAmount(
+        Number(t.amount)
+      )}${t.note ? `｜${t.note}` : ""}`;
     });
-  }
+
+    return interaction.editReply("```\n" + lines.join("\n") + "\n```");
+  },
 };

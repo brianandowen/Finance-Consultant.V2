@@ -1,78 +1,80 @@
-import { Client, GatewayIntentBits, Collection, Events } from "discord.js";
-import dotenv from "dotenv";
-import { pingCommand } from "./commands/ping";
-import { goalCommand } from "./commands/goal";
-import { txnCommand } from "./commands/txn";
-import { balanceCommand } from "./commands/balance";
-import { summaryCommand } from "./commands/summary";
-import { historyCommand } from "./commands/history";
-import { notifyCommand } from "./commands/notify";
+// src/index.ts
+import "dotenv/config";
+import {
+  Client,
+  GatewayIntentBits,
+  Collection,
+  MessageFlags,
+  ChatInputCommandInteraction,
+} from "discord.js";
+import { query } from "./db";
 
-dotenv.config();
+// 指令都用 default export { data, execute }
+import ping from "./commands/ping";
+import goal from "./commands/goal";
+import txn from "./commands/txn";
+import balance from "./commands/balance";
+import summary from "./commands/summary";
+import history from "./commands/history";
+import notify from "./commands/notify";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const commands = new Collection<string, any>([
-  [pingCommand.data.name, pingCommand],
-  [goalCommand.data.name, goalCommand],
-  [txnCommand.data.name, txnCommand],
-  [balanceCommand.data.name, balanceCommand],
-  [summaryCommand.data.name, summaryCommand],
-  [historyCommand.data.name, historyCommand],
-  [notifyCommand.data.name, notifyCommand],
-]);
+const commands = new Collection<string, any>();
+[ping, goal, txn, balance, summary, history, notify].forEach((c) => {
+  if (c?.data?.name && typeof c.execute === "function") {
+    commands.set(c.data.name, c);
+  }
+});
+(client as any).commands = commands;
 
-client.once(Events.ClientReady, () => {
+client.once("ready", async () => {
+  await query("SELECT 1");
+  console.log("DB connected ✅");
   console.log(`🤖 Logged in as ${client.user?.tag}`);
 });
 
-// 保險回覆：依互動狀態選擇 reply / editReply / followUp，避免 10062
-async function safeReply(interaction: any, payload: any) {
-  try {
-    if (interaction.deferred) return await interaction.editReply(payload);
-    if (interaction.replied)  return await interaction.followUp(payload);
-    return await interaction.reply(payload);
-  } catch (e) {
-    console.error("safeReply error:", e);
-  }
-}
+const inFlight = new Set<string>();
 
-client.on(Events.InteractionCreate, async (interaction) => {
+client.removeAllListeners("interactionCreate");
+client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const command = commands.get(interaction.commandName);
-  if (!command) {
-    await safeReply(interaction, { content: "找不到這個指令 🤔", ephemeral: true });
+  if (inFlight.has(interaction.id)) return;
+  inFlight.add(interaction.id);
+
+  const cmd = (client as any).commands?.get?.(interaction.commandName);
+  if (!cmd) {
+    try {
+      await interaction.reply({
+        content: "❌ 找不到這個指令。",
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch {}
+    inFlight.delete(interaction.id);
     return;
   }
 
-  // 2 秒保底：若 2 秒內 command 還沒回，就自動 defer，避免 3 秒逾時
-  const deferTimer = setTimeout(async () => {
+  try {
+    await cmd.execute(interaction as ChatInputCommandInteraction);
+  } catch (err) {
+    console.error(err);
+    const msg = { content: "❌ 指令執行失敗，請稍後重試。", flags: MessageFlags.Ephemeral as any };
     try {
       if (!interaction.deferred && !interaction.replied) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.reply(msg);
+      } else {
+        await interaction.followUp(msg);
       }
-    } catch (e) {
-      // 這裡安靜吞掉，避免計時器晚到造成多次回覆錯誤
-    }
-  }, 2000);
-
-  try {
-    await command.execute(interaction); // 讓各指令照原本邏輯做（可能自己 reply / editReply）
-
-    clearTimeout(deferTimer);
-
-    // 若指令執行完仍未回覆，補一個完成訊息，保證有回應
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: "✅ 完成", ephemeral: true });
-    } else if (interaction.deferred && !interaction.replied) {
-      await interaction.editReply("✅ 完成");
-    }
-  } catch (e) {
-    clearTimeout(deferTimer);
-    console.error(e);
-    await safeReply(interaction, { content: "⚠️ 指令執行錯誤", ephemeral: true });
+    } catch {}
+  } finally {
+    inFlight.delete(interaction.id);
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.on("error", console.error);
+process.on("unhandledRejection", (e) => console.error("unhandledRejection", e));
+process.on("uncaughtException", (e) => console.error("uncaughtException", e));
+
+const TOKEN = process.env.DISCORD_TOKEN!;
+client.login(TOKEN);
