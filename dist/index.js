@@ -3,76 +3,73 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+// src/index.ts
+require("dotenv/config");
 const discord_js_1 = require("discord.js");
-const dotenv_1 = __importDefault(require("dotenv"));
-const ping_1 = require("./commands/ping");
-const goal_1 = require("./commands/goal");
-const txn_1 = require("./commands/txn");
-const balance_1 = require("./commands/balance");
-const summary_1 = require("./commands/summary");
-const history_1 = require("./commands/history");
-const notify_1 = require("./commands/notify");
-dotenv_1.default.config();
+const db_1 = require("./db");
+// 指令都用 default export { data, execute }
+const ping_1 = __importDefault(require("./commands/ping"));
+const goal_1 = __importDefault(require("./commands/goal"));
+const txn_1 = __importDefault(require("./commands/txn"));
+const balance_1 = __importDefault(require("./commands/balance"));
+const summary_1 = __importDefault(require("./commands/summary"));
+const history_1 = __importDefault(require("./commands/history"));
+const notify_1 = __importDefault(require("./commands/notify"));
 const client = new discord_js_1.Client({ intents: [discord_js_1.GatewayIntentBits.Guilds] });
-const commands = new discord_js_1.Collection([
-    [ping_1.pingCommand.data.name, ping_1.pingCommand],
-    [goal_1.goalCommand.data.name, goal_1.goalCommand],
-    [txn_1.txnCommand.data.name, txn_1.txnCommand],
-    [balance_1.balanceCommand.data.name, balance_1.balanceCommand],
-    [summary_1.summaryCommand.data.name, summary_1.summaryCommand],
-    [history_1.historyCommand.data.name, history_1.historyCommand],
-    [notify_1.notifyCommand.data.name, notify_1.notifyCommand],
-]);
-client.once(discord_js_1.Events.ClientReady, () => {
+const commands = new discord_js_1.Collection();
+[ping_1.default, goal_1.default, txn_1.default, balance_1.default, summary_1.default, history_1.default, notify_1.default].forEach((c) => {
+    if (c?.data?.name && typeof c.execute === "function") {
+        commands.set(c.data.name, c);
+    }
+});
+client.commands = commands;
+client.once("ready", async () => {
+    await (0, db_1.query)("SELECT 1");
+    console.log("DB connected ✅");
     console.log(`🤖 Logged in as ${client.user?.tag}`);
 });
-// 保險回覆：依互動狀態選擇 reply / editReply / followUp，避免 10062
-async function safeReply(interaction, payload) {
-    try {
-        if (interaction.deferred)
-            return await interaction.editReply(payload);
-        if (interaction.replied)
-            return await interaction.followUp(payload);
-        return await interaction.reply(payload);
-    }
-    catch (e) {
-        console.error("safeReply error:", e);
-    }
-}
-client.on(discord_js_1.Events.InteractionCreate, async (interaction) => {
+const inFlight = new Set();
+client.removeAllListeners("interactionCreate");
+client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand())
         return;
-    const command = commands.get(interaction.commandName);
-    if (!command) {
-        await safeReply(interaction, { content: "找不到這個指令 🤔", ephemeral: true });
+    if (inFlight.has(interaction.id))
+        return;
+    inFlight.add(interaction.id);
+    const cmd = client.commands?.get?.(interaction.commandName);
+    if (!cmd) {
+        try {
+            await interaction.reply({
+                content: "❌ 找不到這個指令。",
+                flags: discord_js_1.MessageFlags.Ephemeral,
+            });
+        }
+        catch { }
+        inFlight.delete(interaction.id);
         return;
     }
-    // 2 秒保底：若 2 秒內 command 還沒回，就自動 defer，避免 3 秒逾時
-    const deferTimer = setTimeout(async () => {
+    try {
+        await cmd.execute(interaction);
+    }
+    catch (err) {
+        console.error(err);
+        const msg = { content: "❌ 指令執行失敗，請稍後重試。", flags: discord_js_1.MessageFlags.Ephemeral };
         try {
             if (!interaction.deferred && !interaction.replied) {
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.reply(msg);
+            }
+            else {
+                await interaction.followUp(msg);
             }
         }
-        catch (e) {
-            // 這裡安靜吞掉，避免計時器晚到造成多次回覆錯誤
-        }
-    }, 2000);
-    try {
-        await command.execute(interaction); // 讓各指令照原本邏輯做（可能自己 reply / editReply）
-        clearTimeout(deferTimer);
-        // 若指令執行完仍未回覆，補一個完成訊息，保證有回應
-        if (!interaction.replied && !interaction.deferred) {
-            await interaction.reply({ content: "✅ 完成", ephemeral: true });
-        }
-        else if (interaction.deferred && !interaction.replied) {
-            await interaction.editReply("✅ 完成");
-        }
+        catch { }
     }
-    catch (e) {
-        clearTimeout(deferTimer);
-        console.error(e);
-        await safeReply(interaction, { content: "⚠️ 指令執行錯誤", ephemeral: true });
+    finally {
+        inFlight.delete(interaction.id);
     }
 });
-client.login(process.env.DISCORD_TOKEN);
+client.on("error", console.error);
+process.on("unhandledRejection", (e) => console.error("unhandledRejection", e));
+process.on("uncaughtException", (e) => console.error("uncaughtException", e));
+const TOKEN = process.env.DISCORD_TOKEN;
+client.login(TOKEN);

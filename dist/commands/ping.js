@@ -1,12 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.pingCommand = void 0;
+// src/commands/ping.ts
 const discord_js_1 = require("discord.js");
-exports.pingCommand = {
-    data: new discord_js_1.SlashCommandBuilder()
-        .setName("ping")
-        .setDescription("測試 bot 是否存活"),
+exports.default = {
+    data: new discord_js_1.SlashCommandBuilder().setName("ping").setDescription("健康檢查"),
     async execute(interaction) {
-        await interaction.reply("🏓 pong!");
-    }
+        await interaction.reply({ content: "pong 🏓", flags: discord_js_1.MessageFlags.Ephemeral });
+    },
 };

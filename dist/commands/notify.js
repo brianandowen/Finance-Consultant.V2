@@ -1,55 +1,40 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.notifyCommand = void 0;
+// src/commands/notify.ts
 const discord_js_1 = require("discord.js");
 const db_1 = require("../db");
-exports.notifyCommand = {
+exports.default = {
     data: new discord_js_1.SlashCommandBuilder()
         .setName("notify")
-        .setDescription("設定里程碑通知偏好（單人版）")
-        .addStringOption(opt => opt.setName("mode")
+        .setDescription("設定里程碑通知")
+        .addStringOption((o) => o
+        .setName("mode")
         .setDescription("通知方式")
         .setRequired(true)
-        .addChoices({ name: "私訊", value: "dm" }, { name: "頻道", value: "channel" }))
-        .addChannelOption(opt => opt.setName("channel")
-        .setDescription("選擇通知頻道（mode=channel 時必填）")
-        .addChannelTypes(discord_js_1.ChannelType.GuildText))
-        .addIntegerOption(opt => opt.setName("step")
-        .setDescription("每跨幾％提醒一次（預設 10）")
-        .setMinValue(1).setMaxValue(50)),
+        .addChoices({ name: "私訊我", value: "dm" }, { name: "在此頻道", value: "channel" }))
+        .addIntegerOption((o) => o.setName("step").setDescription("里程碑百分比（例如 10 表示每 10%）").setMinValue(1).setMaxValue(100)),
     async execute(interaction) {
+        // ✅ defer 在最前面
+        await interaction.deferReply({ flags: discord_js_1.MessageFlags.Ephemeral });
         const userId = interaction.user.id;
+        await (0, db_1.ensureUser)(userId);
         const mode = interaction.options.getString("mode", true);
-        const channel = interaction.options.getChannel("channel");
         const step = interaction.options.getInteger("step") ?? 10;
-        if (mode === "channel" && !channel) {
-            return interaction.reply({ content: "❌ 請指定通知頻道。", ephemeral: true });
-        }
-        const payload = {
-            user_id: userId,
-            notify_mode: mode,
-            milestone_step_percent: step,
-            updated_at: new Date().toISOString(),
-        };
+        let channelId = null;
         if (mode === "channel") {
-            payload.notify_channel_id = channel.id;
+            if (interaction.channel?.type === discord_js_1.ChannelType.GuildText) {
+                channelId = interaction.channelId;
+            }
+            else {
+                return interaction.editReply("⚠️ 此模式只能在伺服器文字頻道中使用。");
+            }
         }
-        else {
-            payload.notify_channel_id = null;
-        }
-        // upsert settings（以 user_id 為 PK）
-        const { error } = await db_1.supabase
-            .from("settings")
-            .upsert(payload, { onConflict: "user_id" });
-        if (error) {
-            console.error(error);
-            return interaction.reply({ content: "❌ 設定失敗：" + error.message, ephemeral: true });
-        }
-        return interaction.reply({
-            content: `✅ 已更新通知設定\n` +
-                `方式：${mode === "dm" ? "私訊" : `頻道 <#${payload.notify_channel_id}>`}｜` +
-                `里程碑：每 ${step}%`,
-            ephemeral: true,
-        });
+        await (0, db_1.query)(`INSERT INTO settings (user_id, notify_mode, notify_channel_id, milestone_step_percent, last_percent_hit)
+       VALUES ($1, $2, $3, $4, 0)
+       ON CONFLICT (user_id)
+       DO UPDATE SET notify_mode = EXCLUDED.notify_mode,
+                     notify_channel_id = EXCLUDED.notify_channel_id,
+                     milestone_step_percent = EXCLUDED.milestone_step_percent`, [userId, mode, channelId, step]);
+        return interaction.editReply(`✅ 已更新通知設定\n方式：${mode === "dm" ? "私訊" : `頻道 <#${channelId}>`}｜里程碑：每 ${step}%`);
     },
 };
