@@ -1,75 +1,50 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 // src/index.ts
 require("dotenv/config");
 const discord_js_1 = require("discord.js");
-const db_1 = require("./db");
-// 指令都用 default export { data, execute }
-const ping_1 = __importDefault(require("./commands/ping"));
-const goal_1 = __importDefault(require("./commands/goal"));
-const txn_1 = __importDefault(require("./commands/txn"));
-const balance_1 = __importDefault(require("./commands/balance"));
-const summary_1 = __importDefault(require("./commands/summary"));
-const history_1 = __importDefault(require("./commands/history"));
-const notify_1 = __importDefault(require("./commands/notify"));
+const fs_1 = require("fs");
+const path_1 = require("path");
+const env_1 = require("./config/env");
+const guards_1 = require("./lib/guards");
+const reply_1 = require("./lib/reply");
+(0, env_1.validateEnv)();
 const client = new discord_js_1.Client({ intents: [discord_js_1.GatewayIntentBits.Guilds] });
 const commands = new discord_js_1.Collection();
-[ping_1.default, goal_1.default, txn_1.default, balance_1.default, summary_1.default, history_1.default, notify_1.default].forEach((c) => {
-    if (c?.data?.name && typeof c.execute === "function") {
-        commands.set(c.data.name, c);
+function loadCommands() {
+    const dir = (0, path_1.join)(__dirname, 'commands');
+    const files = (0, fs_1.readdirSync)(dir).filter(f => f.endsWith('.ts') || f.endsWith('.js'));
+    for (const file of files) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const mod = require((0, path_1.join)(dir, file));
+        const cmd = mod.default ?? mod;
+        if (cmd?.data?.name && typeof cmd.execute === 'function') {
+            commands.set(cmd.data.name, cmd);
+        }
     }
+    console.log(`[commands] loaded: ${commands.size}`);
+}
+loadCommands();
+client.once(discord_js_1.Events.ClientReady, c => {
+    console.log(`Ready as ${c.user.tag}`);
 });
-client.commands = commands;
-client.once("ready", async () => {
-    await (0, db_1.query)("SELECT 1");
-    console.log("DB connected ✅");
-    console.log(`🤖 Logged in as ${client.user?.tag}`);
-});
-const inFlight = new Set();
-client.removeAllListeners("interactionCreate");
-client.on("interactionCreate", async (interaction) => {
+client.on(discord_js_1.Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand())
         return;
-    if (inFlight.has(interaction.id))
+    const cmd = commands.get(interaction.commandName);
+    if (!cmd)
         return;
-    inFlight.add(interaction.id);
-    const cmd = client.commands?.get?.(interaction.commandName);
-    if (!cmd) {
-        try {
-            await interaction.reply({
-                content: "❌ 找不到這個指令。",
-                flags: discord_js_1.MessageFlags.Ephemeral,
-            });
-        }
-        catch { }
-        inFlight.delete(interaction.id);
-        return;
-    }
+    const uid = interaction.user.id;
+    const name = cmd.data.name;
     try {
-        await cmd.execute(interaction);
+        // 輕量冷卻 + in-flight 鎖，避免重入與洗指令
+        (0, guards_1.ensureCooldown)(uid, name);
+        await (0, guards_1.withInFlight)(uid, name, async () => {
+            await cmd.execute(interaction);
+        });
     }
     catch (err) {
-        console.error(err);
-        const msg = { content: "❌ 指令執行失敗，請稍後重試。", flags: discord_js_1.MessageFlags.Ephemeral };
-        try {
-            if (!interaction.deferred && !interaction.replied) {
-                await interaction.reply(msg);
-            }
-            else {
-                await interaction.followUp(msg);
-            }
-        }
-        catch { }
-    }
-    finally {
-        inFlight.delete(interaction.id);
+        await (0, reply_1.errorReply)(interaction, err);
     }
 });
-client.on("error", console.error);
-process.on("unhandledRejection", (e) => console.error("unhandledRejection", e));
-process.on("uncaughtException", (e) => console.error("uncaughtException", e));
-const TOKEN = process.env.DISCORD_TOKEN;
-client.login(TOKEN);
+client.login((0, env_1.getEnv)('DISCORD_TOKEN'));

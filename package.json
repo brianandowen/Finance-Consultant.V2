@@ -10,16 +10,31 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.55.0",
-    "discord.js": "^14.15.3",
+    "discord.js": "^14.24.0",
     "dotenv": "^16.6.1",
     "luxon": "^3.7.1",
     "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/luxon": "^3.7.1",
-    "@types/node": "^24.3.0",
+    "@types/node": "^24.9.1",
     "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
     "tsx": "^4.19.1",
-    "typescript": "^5.5.4"
-  }
+    "typescript": "^5.9.3"
+  },
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brianandowen/Finance-Consultant.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/brianandowen/Finance-Consultant/issues"
+  },
+  "homepage": "https://github.com/brianandowen/Finance-Consultant#readme",
+  "description": ""
 }

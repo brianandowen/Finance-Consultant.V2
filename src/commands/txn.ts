@@ -1,10 +1,4 @@
 // src/commands/txn.ts
-// ===== 交易指令（add / list / undo）=====
-// - 以 Neon (Postgres) 為後端，不使用 goal_id；一人一個啟用目標
-// - 欄位：ttype('income'|'expense')、amount BIGINT、category TEXT、note TEXT、occurred_at TIMESTAMPTZ
-// - /txn undo：提供下拉選單，讓使用者從最近 10 筆中挑一筆撤銷
-// ------------------------------------------------------
-
 import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
@@ -16,7 +10,7 @@ import {
 } from "discord.js";
 import { query, ensureUser } from "../db";
 import { fmtAmount } from "../utils/number";
-import { formatTW, toUtcDayRangeFromLocal, dateOnlyTW } from "../utils/time";
+import { formatTW, dateOnlyTW } from "../utils/time";
 import {
   INCOME_CATS,
   EXPENSE_CATS,
@@ -24,6 +18,7 @@ import {
   isExpenseCat,
 } from "../utils/categories";
 import { DateTime } from "luxon";
+import { updateNotifyPanel } from "../utils/updateNotifyPanel";
 
 const MAX_LIMIT = 20;
 
@@ -47,7 +42,7 @@ export default {
         .addStringOption((opt) =>
           opt
             .setName("type")
-            .setDescription("收入或支出")
+            .setDescription("收入 or 支出")
             .setRequired(true)
             .addChoices(
               { name: "收入", value: "income" },
@@ -68,56 +63,57 @@ export default {
             )
         )
         .addStringOption((opt) =>
-          opt.setName("note").setDescription("備註（最多 80 字）")
+          opt.setName("note").setDescription("備註").setRequired(false)
         )
     )
     // /txn list
     .addSubcommand((sub) =>
       sub
         .setName("list")
-        .setDescription("查看最近幾筆交易")
+        .setDescription("列出最近交易")
         .addIntegerOption((opt) =>
-          opt
-            .setName("limit")
-            .setDescription(`顯示筆數（1-${MAX_LIMIT}，預設 10）`)
-            .setMinValue(1)
-            .setMaxValue(MAX_LIMIT)
+          opt.setName("limit").setDescription("顯示幾筆（預設10，最大20）")
         )
         .addStringOption((opt) =>
           opt
             .setName("type")
-            .setDescription("篩選收入/支出/全部")
+            .setDescription("all / income / expense（預設 all）")
             .addChoices(
               { name: "全部", value: "all" },
               { name: "收入", value: "income" },
               { name: "支出", value: "expense" }
             )
         )
-        .addStringOption((opt) => opt.setName("category").setDescription("依類別篩選"))
-        .addStringOption((opt) => opt.setName("from").setDescription("起日 YYYY-MM-DD（台北時區）"))
-        .addStringOption((opt) => opt.setName("to").setDescription("迄日 YYYY-MM-DD（台北時區）"))
-        .addStringOption((opt) => opt.setName("keyword").setDescription("備註關鍵字（ILIKE）"))
+        .addStringOption((opt) => opt.setName("category").setDescription("類別"))
+        .addStringOption((opt) =>
+          opt.setName("from").setDescription("開始日 yyyy-mm-dd（本地時區）")
+        )
+        .addStringOption((opt) =>
+          opt.setName("to").setDescription("結束日 yyyy-mm-dd（本地時區）")
+        )
+        .addStringOption((opt) =>
+          opt.setName("keyword").setDescription("備註關鍵字")
+        )
     )
     // /txn undo
     .addSubcommand((sub) =>
-      sub.setName("undo").setDescription("撤銷一筆交易（從最近 10 筆中選）")
+      sub.setName("undo").setDescription("撤銷一筆交易（最近10筆中選）")
     ),
 
   async execute(interaction: ChatInputCommandInteraction) {
-    if (!interaction.isChatInputCommand()) return;
-
     const userId = interaction.user.id;
     const sub = interaction.options.getSubcommand();
 
-    // 確保 users 表有此人
+    // ✅ 第一個 await：立即延遲回覆（避免 3 秒超時）；用 flags 取代 ephemeral
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // 其後才做任何 I/O
     await ensureUser(userId);
 
     // -------------------------------
     // /txn add
     // -------------------------------
     if (sub === "add") {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
       const ttype = interaction.options.getString("type", true) as
         | "income"
         | "expense";
@@ -125,7 +121,6 @@ export default {
       const category = interaction.options.getString("category", true);
       const note = interaction.options.getString("note") ?? null;
 
-      // 基本檢查
       if (ttype === "income" && !isIncomeCat(category)) {
         return interaction.editReply("⚠️ 類別不在收入清單中。");
       }
@@ -136,18 +131,19 @@ export default {
         return interaction.editReply("⚠️ 金額必須 > 0。");
       }
 
-      // 必須有啟用中的目標
       if (!(await hasActiveGoal(userId))) {
-        return interaction.editReply("⚠️ 目前沒有進行中的目標，請先 `/goal set` 再記帳。");
+        return interaction.editReply(
+          "目前沒有進行中的目標。請先用 /goal set 設定。"
+        );
       }
 
       await query(
-        `INSERT INTO transactions (user_id, ttype, category, amount, note, occurred_at)
-         VALUES ($1, $2, $3, $4, $5, now())`,
+        `INSERT INTO transactions (user_id, ttype, category, amount, note, occurred_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, now(), now())`,
         [userId, ttype, category, amount, note]
       );
 
-      // 計算目前累積與進度
+      // 取目標與餘額
       const g = await query<{
         name: string;
         target_amount: string;
@@ -172,9 +168,24 @@ export default {
       const target = Number(goal?.target_amount ?? 0);
       const remaining = Math.max(target - net, 0);
 
-      // ✅ 修正：先算 pct，再夾在 0~100 之間
       const pct = target > 0 ? Number(((net / target) * 100).toFixed(1)) : 0;
       const progress = target > 0 ? Math.min(100, Math.max(0, pct)) : 0;
+
+      // auto close
+      let closedMsg = "";
+      if (goal && target > 0 && net >= target) {
+        await query(
+          `UPDATE goals SET is_active=FALSE, updated_at=now()
+             WHERE user_id=$1 AND is_active=TRUE`,
+          [userId]
+        );
+        closedMsg = `\n🎉 你已達成目標「${goal.name}」，已自動關閉。`;
+      }
+
+      // 更新浮動面板（best-effort）
+      updateNotifyPanel(userId, interaction.client).catch((e) =>
+        console.warn("[txn.add] updateNotifyPanel failed:", (e as Error).message)
+      );
 
       // 截止資訊
       let extra = "";
@@ -183,12 +194,15 @@ export default {
         const dueEnd = DateTime.fromISO(goal.deadline, {
           zone: "Asia/Taipei",
         }).endOf("day");
-        const daysLeft = Math.max(0, Math.ceil(dueEnd.diff(nowTW, "days").days));
+        const daysLeft = Math.max(
+          0,
+          Math.ceil(dueEnd.diff(nowTW, "days").days)
+        );
         if (daysLeft > 0) {
           const dailyNeeded = Math.ceil(remaining / daysLeft);
-          extra = `\n⏳ 截止 ${dateOnlyTW(goal.deadline)}｜日均需：$${fmtAmount(
-            dailyNeeded
-          )}（剩 ${daysLeft} 天）`;
+          extra = `\n⏳ 截止 ${dateOnlyTW(
+            goal.deadline
+          )}｜日均需：$${fmtAmount(dailyNeeded)}（剩 ${daysLeft} 天）`;
         } else {
           extra = `\n⏳ 已到截止日（${dateOnlyTW(goal.deadline)}）`;
         }
@@ -201,7 +215,8 @@ export default {
           `📈 累積：$${fmtAmount(net)}｜📊 達成率：${progress}%｜📉 距離目標：$${fmtAmount(
             remaining
           )}` +
-          extra
+          extra +
+          closedMsg
       );
       return;
     }
@@ -210,8 +225,6 @@ export default {
     // /txn list
     // -------------------------------
     if (sub === "list") {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
       const limit = interaction.options.getInteger("limit") ?? 10;
       const type = (interaction.options.getString("type") ?? "all") as
         | "all"
@@ -235,18 +248,18 @@ export default {
         params.push(category);
       }
       if (fromStr) {
-        const r = toUtcDayRangeFromLocal(fromStr);
-        if (r) {
-          where.push(`occurred_at >= $${idx++}`);
-          params.push(r.from);
-        }
-      }
-      if (toStr) {
-        const r = toUtcDayRangeFromLocal(toStr);
-        if (r) {
-          where.push(`occurred_at < $${idx++}`);
-          params.push(r.to);
-        }
+        const tz = "Asia/Taipei";
+        const toLocal = toStr ?? fromStr;
+        const fromUTC = DateTime.fromISO(fromStr, { zone: tz })
+          .startOf("day")
+          .toUTC()
+          .toISO();
+        const toUTC = DateTime.fromISO(toLocal, { zone: tz })
+          .endOf("day")
+          .toUTC()
+          .toISO();
+        where.push(`occurred_at >= $${idx++} AND occurred_at <= $${idx++}`);
+        params.push(fromUTC, toUTC);
       }
       if (keyword) {
         where.push(`note ILIKE $${idx++}`);
@@ -254,124 +267,98 @@ export default {
       }
 
       const rows = await query<{
+        id: string;
         ttype: "income" | "expense";
-        amount: string;
         category: string;
+        amount: string;
         note: string | null;
         occurred_at: string;
       }>(
-        `
-        SELECT ttype, amount::BIGINT::TEXT AS amount, category, note,
-               occurred_at AT TIME ZONE 'UTC' AS occurred_at
-          FROM transactions
-         WHERE ${where.join(" AND ")}
-         ORDER BY occurred_at DESC
-         LIMIT ${Math.min(MAX_LIMIT, Math.max(1, limit))}
-        `,
-        params
+        `SELECT id, ttype, category, amount, note, occurred_at
+           FROM transactions
+          WHERE ${where.join(" AND ")}
+          ORDER BY occurred_at DESC
+          LIMIT $${idx}`,
+        [...params, Math.min(limit, MAX_LIMIT)]
       );
 
-      const lines = rows.rows.map((t) => {
-        const sign = t.ttype === "income" ? "+" : "-";
-        return `${formatTW(t.occurred_at)}｜${
-          t.ttype === "income" ? "收入" : "支出"
-        }｜${t.category}｜${sign}$${fmtAmount(Number(t.amount))}${
-          t.note ? `｜${t.note}` : ""
-        }`;
+      if (rows.rowCount === 0) {
+        return interaction.editReply("目前沒有符合條件的交易。");
+      }
+
+      const lines = rows.rows.map((r) => {
+        const sign = r.ttype === "income" ? "+" : "-";
+        return `${formatTW(r.occurred_at)}｜${sign}$${fmtAmount(
+          Number(r.amount)
+        )}｜${r.category}${r.note ? `｜${r.note}` : ""}`;
       });
 
-      await interaction.editReply({
-        content: lines.length ? "```\n" + lines.join("\n") + "\n```" : "（無符合條件的交易）",
-      });
-      return;
+      return interaction.editReply("最近交易：\n" + lines.join("\n"));
     }
 
     // -------------------------------
-    // /txn undo（下拉選單）
+    // /txn undo
     // -------------------------------
     if (sub === "undo") {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-      // 取最近 10 筆
-      const rs = await query<{
+      const latest = await query<{
         id: string;
         ttype: "income" | "expense";
-        amount: string;
         category: string;
+        amount: string;
         note: string | null;
         occurred_at: string;
       }>(
-        `
-        SELECT id,
-               ttype,
-               amount::BIGINT::TEXT AS amount,
-               category,
-               note,
-               occurred_at AT TIME ZONE 'UTC' AS occurred_at
-          FROM transactions
-         WHERE user_id=$1
-         ORDER BY created_at DESC
-         LIMIT 10
-        `,
+        `SELECT id, ttype, category, amount, note, occurred_at
+           FROM transactions
+          WHERE user_id=$1
+          ORDER BY occurred_at DESC
+          LIMIT 10`,
         [userId]
       );
 
-      if (!rs.rows.length) {
-        await interaction.editReply("⚠️ 沒有可以撤銷的交易。");
-        return;
+      if (latest.rowCount === 0) {
+        return interaction.editReply("沒有可撤銷的交易。");
       }
 
-      // 建立下拉選單（label 最長 100 字，value 存 id）
-      const options = rs.rows.map((t) => {
-        const sign = t.ttype === "income" ? "+" : "-";
-        const labelRaw = `${formatTW(t.occurred_at)}｜${
-          t.ttype === "income" ? "收入" : "支出"
-        }｜${t.category}｜${sign}$${fmtAmount(Number(t.amount))}${
-          t.note ? `｜${t.note}` : ""
-        }`;
-        const label = labelRaw.length > 100 ? labelRaw.slice(0, 97) + "..." : labelRaw;
-        return { label, value: t.id };
-      });
-
       const menu = new StringSelectMenuBuilder()
-        .setCustomId(`undo:${userId}`)
-        .setPlaceholder("選擇要撤銷的交易（最近 10 筆）")
-        .addOptions(options);
+        .setCustomId("undo_txn")
+        .setPlaceholder("選擇一筆要撤銷的交易")
+        .addOptions(
+          latest.rows.map((r) => ({
+            label: `${formatTW(r.occurred_at)} ${r.ttype === "income" ? "+" : "-"}$${fmtAmount(
+              Number(r.amount)
+            )}｜${r.category}`,
+            value: r.id,
+            description: r.note ?? undefined,
+          }))
+        );
 
-      const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+      const row =
+        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 
-      const msg = await interaction.editReply({
-        content: "請從下拉選單選擇要撤銷的交易：",
+      const sent = await interaction.editReply({
+        content: "請選擇要撤銷的交易：",
         components: [row],
       });
 
-      try {
-        const picked = (await (msg as any).awaitMessageComponent({
-          componentType: ComponentType.StringSelect,
-          time: 60_000,
-          filter: (i: StringSelectMenuInteraction) =>
-            i.user.id === userId && i.customId === `undo:${userId}`,
-        })) as StringSelectMenuInteraction;
+      const select = await (sent as any).awaitMessageComponent({
+        componentType: ComponentType.StringSelect,
+        time: 30_000,
+      });
 
-        const id = picked.values[0];
+      const pickedId = (select as StringSelectMenuInteraction).values[0];
 
-        await query(`DELETE FROM transactions WHERE id = $1 AND user_id=$2`, [
-          id,
-          userId,
-        ]);
+      await query(`DELETE FROM transactions WHERE id=$1 AND user_id=$2`, [
+        pickedId,
+        userId,
+      ]);
 
-        await picked.update({
-          content: "↩️ 已撤銷所選交易。",
-          components: [],
-        });
-      } catch {
-        // 超時或其他錯誤
-        await interaction.editReply({
-          content: "⌛ 已超時或未選擇，操作取消。",
-          components: [],
-        });
-      }
+      // best-effort 刷新面板
+      updateNotifyPanel(userId, interaction.client).catch((e) =>
+        console.warn("[txn.undo] updateNotifyPanel failed:", (e as Error).message)
+      );
 
+      await select.update({ content: "✅ 已撤銷該筆交易。", components: [] });
       return;
     }
   },

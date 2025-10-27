@@ -1,31 +1,64 @@
+// src/utils/time.ts
 import { DateTime } from "luxon";
 
-/** 以 Asia/Taipei 顯示 MM/DD HH:mm */
-export function formatTW(iso: string | Date) {
-  const d = typeof iso === "string" ? DateTime.fromISO(iso) : DateTime.fromJSDate(iso);
-  return d.setZone("Asia/Taipei").toFormat("MM/dd HH:mm");
+/**
+ * 通用日期解析函式：
+ * 能處理 Date 物件、ISO 字串、SQL 字串等多種格式。
+ */
+function parseDate(value: unknown, zone = "Asia/Taipei"): DateTime | null {
+  if (!value) return null;
+
+  // 若是 Date 物件（例如 PG 驅動回傳的 timestamp）
+  if (value instanceof Date) {
+    const dt = DateTime.fromJSDate(value, { zone });
+    return dt.isValid ? dt : null;
+  }
+
+  // 若是字串
+  const str = String(value).trim();
+  if (!str) return null;
+
+  // 1️⃣ 嘗試解析 ISO 格式 (含 T/Z)
+  let dt = DateTime.fromISO(str, { zone });
+  if (dt.isValid) return dt;
+
+  // 2️⃣ 嘗試解析 SQL 格式 (YYYY-MM-DD HH:mm:ss)
+  dt = DateTime.fromSQL(str, { zone });
+  if (dt.isValid) return dt;
+
+  // 3️⃣ 嘗試 UNIX timestamp (有些版本會給整數字串)
+  const num = Number(str);
+  if (!Number.isNaN(num) && num > 1000000000) {
+    dt = DateTime.fromMillis(num, { zone });
+    if (dt.isValid) return dt;
+  }
+
+  // 全部都不行就回傳 null
+  return null;
 }
 
-/** 取得「本月」的 UTC 查詢區間（含起，不含迄） */
-export function monthRangeUTC() {
-  const nowTW = DateTime.now().setZone("Asia/Taipei");
-  return {
-    from: nowTW.startOf("month").toUTC().toISO(),
-    to: nowTW.endOf("month").plus({ millisecond: 1 }).toUTC().toISO(), // < to
-  };
+/**
+ * 顯示格式：月/日 時:分（台北時間）
+ * e.g. 10/27 14:05
+ */
+export function formatTW(value: unknown): string {
+  const dt = parseDate(value, "Asia/Taipei");
+  return dt ? dt.toFormat("MM/dd HH:mm") : "Invalid DateTime";
 }
 
-/** 以 Asia/Taipei 顯示 YYYY-MM-DD（給 deadline 等） */
-export function dateOnlyTW(iso: string | null | undefined) {
-  if (!iso) return "";
-  return DateTime.fromISO(iso).setZone("Asia/Taipei").toFormat("yyyy-MM-dd");
+/**
+ * 顯示格式：年-月-日（台北時間）
+ * e.g. 2025-10-30
+ */
+export function dateOnlyTW(value: unknown): string {
+  const dt = parseDate(value, "Asia/Taipei");
+  return dt ? dt.toFormat("yyyy-MM-dd") : "Invalid DateTime";
 }
 
-/** 把 YYYY-MM-DD（用 Asia/Taipei 解讀）轉成 UTC 起訖 ISO，用於 where gte/lt */
-export function toUtcDayRangeFromLocal(dateStr: string) {
-  const d = DateTime.fromISO(dateStr, { zone: "Asia/Taipei" });
-  if (!d.isValid) return null;
-  const from = d.startOf("day").toUTC().toISO();
-  const to   = d.endOf("day").plus({ millisecond: 1 }).toUTC().toISO();
-  return { from, to };
+/**
+ * 驗證日期字串是否合法（ISO / SQL 格式皆可）
+ */
+export function isValidISODate(value: unknown): boolean {
+  const dt = parseDate(value, "Asia/Taipei");
+  return !!dt;
 }
