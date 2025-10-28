@@ -19,7 +19,7 @@ async function getActiveGoal(userId) {
   );
   return r.rows[0] ?? null;
 }
-
+// 全期間淨額（收入加、其他減）
 // 全期間淨額（收入加、其他減）
 async function getTotalNet(userId) {
   const r = await (0, db_1.query)(

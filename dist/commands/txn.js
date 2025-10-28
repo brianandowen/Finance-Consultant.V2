@@ -13,6 +13,7 @@ async function hasActiveGoal(userId) {
     const r = await (0, db_1.query)(`SELECT 1 FROM goals WHERE user_id=$1 AND is_active=TRUE LIMIT 1`, [userId]);
     return !!r.rows[0];
 }
+// 全期間淨額（收入加、其他減）
 exports.default = {
     data: new discord_js_1.SlashCommandBuilder()
         .setName("txn")
