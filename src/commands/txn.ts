@@ -1,4 +1,3 @@
-// src/commands/txn.ts
 import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
@@ -21,6 +20,7 @@ import { DateTime } from "luxon";
 import { updateNotifyPanel } from "../utils/updateNotifyPanel";
 
 const MAX_LIMIT = 20;
+const MODE = (process.env.GOAL_PROGRESS_MODE || "fresh").toLowerCase() as "fresh" | "carry";
 
 async function hasActiveGoal(userId: string) {
   const r = await query(
@@ -28,6 +28,37 @@ async function hasActiveGoal(userId: string) {
     [userId]
   );
   return !!r.rows[0];
+}
+
+async function getActiveGoalLite(userId: string) {
+  const r = await query<{ name: string; target_amount: string; deadline: string | null; created_at: string }>(
+    `SELECT name, target_amount, deadline, created_at
+       FROM goals
+      WHERE user_id=$1 AND is_active=TRUE
+      LIMIT 1`,
+    [userId]
+  );
+  return r.rows[0] ?? null;
+}
+
+async function getTotalNet(userId: string) {
+  const r = await query<{ balance: string }>(
+    `SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
+       FROM transactions
+      WHERE user_id=$1`,
+    [userId]
+  );
+  return Number(r.rows[0]?.balance ?? 0);
+}
+
+async function getNetSince(userId: string, fromISO: string) {
+  const r = await query<{ balance: string }>(
+    `SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
+       FROM transactions
+      WHERE user_id=$1 AND created_at >= $2`,
+    [userId, fromISO]
+  );
+  return Number(r.rows[0]?.balance ?? 0);
 }
 
 export default {
@@ -104,10 +135,7 @@ export default {
     const userId = interaction.user.id;
     const sub = interaction.options.getSubcommand();
 
-    // ✅ 第一個 await：立即延遲回覆（避免 3 秒超時）；用 flags 取代 ephemeral
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    // 其後才做任何 I/O
     await ensureUser(userId);
 
     // -------------------------------
@@ -132,9 +160,7 @@ export default {
       }
 
       if (!(await hasActiveGoal(userId))) {
-        return interaction.editReply(
-          "目前沒有進行中的目標。請先用 /goal set 設定。"
-        );
+        return interaction.editReply("目前沒有進行中的目標。請先用 /goal set 設定。");
       }
 
       await query(
@@ -143,37 +169,21 @@ export default {
         [userId, ttype, category, amount, note]
       );
 
-      // 取目標與餘額
-      const g = await query<{
-        name: string;
-        target_amount: string;
-        deadline: string | null;
-      }>(
-        `SELECT name, target_amount, deadline
-           FROM goals
-          WHERE user_id=$1 AND is_active=TRUE
-          LIMIT 1`,
-        [userId]
-      );
-      const goal = g.rows[0];
-
-      const bal = await query<{ balance: string }>(
-        `SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
-           FROM transactions
-          WHERE user_id=$1`,
-        [userId]
-      );
-
-      const net = Number(bal.rows[0]?.balance ?? 0);
+      // 取目標與「依模式」的累積金額
+      const goal = await getActiveGoalLite(userId);
       const target = Number(goal?.target_amount ?? 0);
-      const remaining = Math.max(target - net, 0);
 
-      const pct = target > 0 ? Number(((net / target) * 100).toFixed(1)) : 0;
+      const saved = goal
+        ? (MODE === "carry" ? await getTotalNet(userId) : await getNetSince(userId, goal.created_at))
+        : 0;
+
+      const remaining = Math.max(target - saved, 0);
+      const pct = target > 0 ? Number(((saved / target) * 100).toFixed(1)) : 0;
       const progress = target > 0 ? Math.min(100, Math.max(0, pct)) : 0;
 
-      // auto close
+      // auto close（依模式下的 saved 判斷）
       let closedMsg = "";
-      if (goal && target > 0 && net >= target) {
+      if (goal && target > 0 && saved >= target) {
         await query(
           `UPDATE goals SET is_active=FALSE, updated_at=now()
              WHERE user_id=$1 AND is_active=TRUE`,
@@ -191,32 +201,20 @@ export default {
       let extra = "";
       if (goal?.deadline) {
         const nowTW = DateTime.now().setZone("Asia/Taipei");
-        const dueEnd = DateTime.fromISO(goal.deadline, {
-          zone: "Asia/Taipei",
-        }).endOf("day");
-        const daysLeft = Math.max(
-          0,
-          Math.ceil(dueEnd.diff(nowTW, "days").days)
-        );
+        const dueEnd = DateTime.fromISO(goal.deadline, { zone: "Asia/Taipei" }).endOf("day");
+        const daysLeft = Math.max(0, Math.ceil(dueEnd.diff(nowTW, "days").days));
         if (daysLeft > 0) {
           const dailyNeeded = Math.ceil(remaining / daysLeft);
-          extra = `\n⏳ 截止 ${dateOnlyTW(
-            goal.deadline
-          )}｜日均需：$${fmtAmount(dailyNeeded)}（剩 ${daysLeft} 天）`;
+          extra = `\n⏳ 截止 ${dateOnlyTW(goal.deadline)}｜日均需：$${fmtAmount(dailyNeeded)}（剩 ${daysLeft} 天）`;
         } else {
           extra = `\n⏳ 已到截止日（${dateOnlyTW(goal.deadline)}）`;
         }
       }
 
       await interaction.editReply(
-        `✅ 已新增 ${ttype === "income" ? "收入" : "支出"}：$${fmtAmount(
-          amount
-        )}｜${category}${note ? `｜備註：${note}` : ""}\n` +
-          `📈 累積：$${fmtAmount(net)}｜📊 達成率：${progress}%｜📉 距離目標：$${fmtAmount(
-            remaining
-          )}` +
-          extra +
-          closedMsg
+        `✅ 已新增 ${ttype === "income" ? "收入" : "支出"}：$${fmtAmount(amount)}｜${category}${note ? `｜備註：${note}` : ""}\n` +
+        `📈 累積：$${fmtAmount(saved)}｜📊 達成率：${progress}%｜📉 距離目標：$${fmtAmount(remaining)}` +
+        extra + closedMsg
       );
       return;
     }
@@ -250,14 +248,8 @@ export default {
       if (fromStr) {
         const tz = "Asia/Taipei";
         const toLocal = toStr ?? fromStr;
-        const fromUTC = DateTime.fromISO(fromStr, { zone: tz })
-          .startOf("day")
-          .toUTC()
-          .toISO();
-        const toUTC = DateTime.fromISO(toLocal, { zone: tz })
-          .endOf("day")
-          .toUTC()
-          .toISO();
+        const fromUTC = DateTime.fromISO(fromStr, { zone: tz }).startOf("day").toUTC().toISO();
+        const toUTC = DateTime.fromISO(toLocal, { zone: tz }).endOf("day").toUTC().toISO();
         where.push(`occurred_at >= $${idx++} AND occurred_at <= $${idx++}`);
         params.push(fromUTC, toUTC);
       }
@@ -288,9 +280,7 @@ export default {
 
       const lines = rows.rows.map((r) => {
         const sign = r.ttype === "income" ? "+" : "-";
-        return `${formatTW(r.occurred_at)}｜${sign}$${fmtAmount(
-          Number(r.amount)
-        )}｜${r.category}${r.note ? `｜${r.note}` : ""}`;
+        return `${formatTW(r.occurred_at)}｜${sign}$${fmtAmount(Number(r.amount))}｜${r.category}${r.note ? `｜${r.note}` : ""}`;
       });
 
       return interaction.editReply("最近交易：\n" + lines.join("\n"));
@@ -325,16 +315,13 @@ export default {
         .setPlaceholder("選擇一筆要撤銷的交易")
         .addOptions(
           latest.rows.map((r) => ({
-            label: `${formatTW(r.occurred_at)} ${r.ttype === "income" ? "+" : "-"}$${fmtAmount(
-              Number(r.amount)
-            )}｜${r.category}`,
+            label: `${formatTW(r.occurred_at)} ${r.ttype === "income" ? "+" : "-"}$${fmtAmount(Number(r.amount))}｜${r.category}`,
             value: r.id,
             description: r.note ?? undefined,
           }))
         );
 
-      const row =
-        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+      const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 
       const sent = await interaction.editReply({
         content: "請選擇要撤銷的交易：",
@@ -348,10 +335,7 @@ export default {
 
       const pickedId = (select as StringSelectMenuInteraction).values[0];
 
-      await query(`DELETE FROM transactions WHERE id=$1 AND user_id=$2`, [
-        pickedId,
-        userId,
-      ]);
+      await query(`DELETE FROM transactions WHERE id=$1 AND user_id=$2`, [pickedId, userId]);
 
       // best-effort 刷新面板
       updateNotifyPanel(userId, interaction.client).catch((e) =>

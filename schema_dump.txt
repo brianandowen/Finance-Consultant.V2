@@ -1,0 +1,60 @@
+
+=== TABLE: goals ===
+- id  (uuid)  nullable=NO  default=gen_random_uuid()
+- user_id  (text)  nullable=NO  default=NULL
+- name  (text)  nullable=NO  default='Default Goal'::text
+- target_amount  (bigint)  nullable=NO  default=NULL
+- start_date  (date)  nullable=YES  default=CURRENT_DATE
+- deadline  (date)  nullable=YES  default=NULL
+- is_active  (boolean)  nullable=NO  default=true
+- created_at  (timestamp with time zone)  nullable=NO  default=now()
+- updated_at  (timestamp with time zone)  nullable=NO  default=now()
+rows: 0
+
+=== TABLE: milestone_logs ===
+- id  (uuid)  nullable=NO  default=gen_random_uuid()
+- user_id  (text)  nullable=NO  default=NULL
+- percent_hit  (integer)  nullable=NO  default=NULL
+- balance_at  (bigint)  nullable=NO  default=NULL
+- hit_at  (timestamp with time zone)  nullable=NO  default=now()
+rows: 0
+
+=== TABLE: settings ===
+- user_id  (text)  nullable=NO  default=NULL
+- notify_mode  (text)  nullable=NO  default='dm'::text
+- notify_channel_id  (text)  nullable=YES  default=NULL
+- milestone_step_percent  (integer)  nullable=NO  default=10
+- last_percent_hit  (integer)  nullable=NO  default=0
+- updated_at  (timestamp with time zone)  nullable=NO  default=now()
+rows: 1
+samples:
+{
+  user_id: '455246178121023500',
+  notify_mode: 'channel',
+  notify_channel_id: '1407694852455534743',
+  milestone_step_percent: 15,
+  last_percent_hit: 0,
+  updated_at: 2025-10-26T13:48:44.545Z
+}
+
+=== TABLE: transactions ===
+- id  (uuid)  nullable=NO  default=gen_random_uuid()
+- user_id  (text)  nullable=NO  default=NULL
+- ttype  (USER-DEFINED)  nullable=NO  default=NULL
+- category  (text)  nullable=NO  default=NULL
+- amount  (bigint)  nullable=NO  default=NULL
+- note  (text)  nullable=YES  default=NULL
+- occurred_at  (timestamp with time zone)  nullable=NO  default=now()
+- created_at  (timestamp with time zone)  nullable=NO  default=now()
+rows: 0
+
+=== TABLE: users ===
+- user_id  (text)  nullable=NO  default=NULL
+- created_at  (timestamp with time zone)  nullable=NO  default=now()
+rows: 1
+samples:
+{ user_id: '455246178121023500', created_at: 2025-10-25T15:33:17.443Z }
+
+=== VIEWS ===
+- v_goal_progress
+- v_user_balance

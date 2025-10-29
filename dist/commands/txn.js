@@ -1,6 +1,5 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-// src/commands/txn.ts
 const discord_js_1 = require("discord.js");
 const db_1 = require("../db");
 const number_1 = require("../utils/number");
@@ -9,11 +8,30 @@ const categories_1 = require("../utils/categories");
 const luxon_1 = require("luxon");
 const updateNotifyPanel_1 = require("../utils/updateNotifyPanel");
 const MAX_LIMIT = 20;
+const MODE = (process.env.GOAL_PROGRESS_MODE || "fresh").toLowerCase();
 async function hasActiveGoal(userId) {
     const r = await (0, db_1.query)(`SELECT 1 FROM goals WHERE user_id=$1 AND is_active=TRUE LIMIT 1`, [userId]);
     return !!r.rows[0];
 }
-// 全期間淨額（收入加、其他減）
+async function getActiveGoalLite(userId) {
+    const r = await (0, db_1.query)(`SELECT name, target_amount, deadline, created_at
+       FROM goals
+      WHERE user_id=$1 AND is_active=TRUE
+      LIMIT 1`, [userId]);
+    return r.rows[0] ?? null;
+}
+async function getTotalNet(userId) {
+    const r = await (0, db_1.query)(`SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
+       FROM transactions
+      WHERE user_id=$1`, [userId]);
+    return Number(r.rows[0]?.balance ?? 0);
+}
+async function getNetSince(userId, fromISO) {
+    const r = await (0, db_1.query)(`SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
+       FROM transactions
+      WHERE user_id=$1 AND created_at >= $2`, [userId, fromISO]);
+    return Number(r.rows[0]?.balance ?? 0);
+}
 exports.default = {
     data: new discord_js_1.SlashCommandBuilder()
         .setName("txn")
@@ -52,9 +70,7 @@ exports.default = {
     async execute(interaction) {
         const userId = interaction.user.id;
         const sub = interaction.options.getSubcommand();
-        // ✅ 第一個 await：立即延遲回覆（避免 3 秒超時）；用 flags 取代 ephemeral
         await interaction.deferReply({ flags: discord_js_1.MessageFlags.Ephemeral });
-        // 其後才做任何 I/O
         await (0, db_1.ensureUser)(userId);
         // -------------------------------
         // /txn add
@@ -78,23 +94,18 @@ exports.default = {
             }
             await (0, db_1.query)(`INSERT INTO transactions (user_id, ttype, category, amount, note, occurred_at, created_at)
          VALUES ($1, $2, $3, $4, $5, now(), now())`, [userId, ttype, category, amount, note]);
-            // 取目標與餘額
-            const g = await (0, db_1.query)(`SELECT name, target_amount, deadline
-           FROM goals
-          WHERE user_id=$1 AND is_active=TRUE
-          LIMIT 1`, [userId]);
-            const goal = g.rows[0];
-            const bal = await (0, db_1.query)(`SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
-           FROM transactions
-          WHERE user_id=$1`, [userId]);
-            const net = Number(bal.rows[0]?.balance ?? 0);
+            // 取目標與「依模式」的累積金額
+            const goal = await getActiveGoalLite(userId);
             const target = Number(goal?.target_amount ?? 0);
-            const remaining = Math.max(target - net, 0);
-            const pct = target > 0 ? Number(((net / target) * 100).toFixed(1)) : 0;
+            const saved = goal
+                ? (MODE === "carry" ? await getTotalNet(userId) : await getNetSince(userId, goal.created_at))
+                : 0;
+            const remaining = Math.max(target - saved, 0);
+            const pct = target > 0 ? Number(((saved / target) * 100).toFixed(1)) : 0;
             const progress = target > 0 ? Math.min(100, Math.max(0, pct)) : 0;
-            // auto close
+            // auto close（依模式下的 saved 判斷）
             let closedMsg = "";
-            if (goal && target > 0 && net >= target) {
+            if (goal && target > 0 && saved >= target) {
                 await (0, db_1.query)(`UPDATE goals SET is_active=FALSE, updated_at=now()
              WHERE user_id=$1 AND is_active=TRUE`, [userId]);
                 closedMsg = `\n🎉 你已達成目標「${goal.name}」，已自動關閉。`;
@@ -105,9 +116,7 @@ exports.default = {
             let extra = "";
             if (goal?.deadline) {
                 const nowTW = luxon_1.DateTime.now().setZone("Asia/Taipei");
-                const dueEnd = luxon_1.DateTime.fromISO(goal.deadline, {
-                    zone: "Asia/Taipei",
-                }).endOf("day");
+                const dueEnd = luxon_1.DateTime.fromISO(goal.deadline, { zone: "Asia/Taipei" }).endOf("day");
                 const daysLeft = Math.max(0, Math.ceil(dueEnd.diff(nowTW, "days").days));
                 if (daysLeft > 0) {
                     const dailyNeeded = Math.ceil(remaining / daysLeft);
@@ -118,9 +127,8 @@ exports.default = {
                 }
             }
             await interaction.editReply(`✅ 已新增 ${ttype === "income" ? "收入" : "支出"}：$${(0, number_1.fmtAmount)(amount)}｜${category}${note ? `｜備註：${note}` : ""}\n` +
-                `📈 累積：$${(0, number_1.fmtAmount)(net)}｜📊 達成率：${progress}%｜📉 距離目標：$${(0, number_1.fmtAmount)(remaining)}` +
-                extra +
-                closedMsg);
+                `📈 累積：$${(0, number_1.fmtAmount)(saved)}｜📊 達成率：${progress}%｜📉 距離目標：$${(0, number_1.fmtAmount)(remaining)}` +
+                extra + closedMsg);
             return;
         }
         // -------------------------------
@@ -147,14 +155,8 @@ exports.default = {
             if (fromStr) {
                 const tz = "Asia/Taipei";
                 const toLocal = toStr ?? fromStr;
-                const fromUTC = luxon_1.DateTime.fromISO(fromStr, { zone: tz })
-                    .startOf("day")
-                    .toUTC()
-                    .toISO();
-                const toUTC = luxon_1.DateTime.fromISO(toLocal, { zone: tz })
-                    .endOf("day")
-                    .toUTC()
-                    .toISO();
+                const fromUTC = luxon_1.DateTime.fromISO(fromStr, { zone: tz }).startOf("day").toUTC().toISO();
+                const toUTC = luxon_1.DateTime.fromISO(toLocal, { zone: tz }).endOf("day").toUTC().toISO();
                 where.push(`occurred_at >= $${idx++} AND occurred_at <= $${idx++}`);
                 params.push(fromUTC, toUTC);
             }
@@ -206,10 +208,7 @@ exports.default = {
                 time: 30000,
             });
             const pickedId = select.values[0];
-            await (0, db_1.query)(`DELETE FROM transactions WHERE id=$1 AND user_id=$2`, [
-                pickedId,
-                userId,
-            ]);
+            await (0, db_1.query)(`DELETE FROM transactions WHERE id=$1 AND user_id=$2`, [pickedId, userId]);
             // best-effort 刷新面板
             (0, updateNotifyPanel_1.updateNotifyPanel)(userId, interaction.client).catch((e) => console.warn("[txn.undo] updateNotifyPanel failed:", e.message));
             await select.update({ content: "✅ 已撤銷該筆交易。", components: [] });

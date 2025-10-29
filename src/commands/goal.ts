@@ -6,10 +6,18 @@ import { fmtAmount } from "../utils/number";
 import { dateOnlyTW, isValidISODate } from "../utils/time";
 import { updateNotifyPanel } from "../utils/updateNotifyPanel";
 
+const MODE = (process.env.GOAL_PROGRESS_MODE || "fresh").toLowerCase() as "fresh" | "carry";
+
+type GoalRow = {
+  id: string;
+  name: string;
+  target_amount: string | number;
+  deadline: string | null;
+  created_at: string;
+};
+
 async function getActiveGoal(userId: string) {
-  const r = await query<{
-    id: string; name: string; target_amount: string; deadline: string | null; created_at: string;
-  }>(
+  const r = await query<GoalRow>(
     `SELECT id, name, target_amount, deadline, created_at
        FROM goals
       WHERE user_id=$1 AND is_active=TRUE
@@ -19,12 +27,22 @@ async function getActiveGoal(userId: string) {
   return r.rows[0] ?? null;
 }
 
-async function getNetBalance(userId: string) {
+async function getTotalNet(userId: string) {
   const r = await query<{ balance: string }>(
     `SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
        FROM transactions
       WHERE user_id=$1`,
     [userId]
+  );
+  return Number(r.rows[0]?.balance ?? 0);
+}
+
+async function getNetSince(userId: string, fromISO: string) {
+  const r = await query<{ balance: string }>(
+    `SELECT COALESCE(SUM(CASE WHEN ttype='income' THEN amount ELSE -amount END),0)::BIGINT AS balance
+       FROM transactions
+      WHERE user_id=$1 AND created_at >= $2`,
+    [userId, fromISO]
   );
   return Number(r.rows[0]?.balance ?? 0);
 }
@@ -100,7 +118,6 @@ export default {
     }
 
     if (sub === "off") {
-      // 冪等：就算沒有 active 也不報錯
       const active = await getActiveGoal(userId);
       await query(
         `UPDATE goals SET is_active=FALSE, updated_at=now()
@@ -123,18 +140,24 @@ export default {
       const active = await getActiveGoal(userId);
       if (!active) return interaction.editReply("目前沒有啟用中的目標。");
 
-      const net = await getNetBalance(userId);
       const target = Number(active.target_amount);
-      const progress = target > 0 ? Math.min(100, Math.max(0, Number(((net / target) * 100).toFixed(1)))) : 0;
-      const remaining = Math.max(target - net, 0);
+      const saved = MODE === "carry"
+        ? await getTotalNet(userId)
+        : await getNetSince(userId, active.created_at);
 
+      const progress = target > 0 ? Math.min(100, Math.max(0, Number(((saved / target) * 100).toFixed(1)))) : 0;
+      const remaining = Math.max(target - saved, 0);
+
+      const labelSaved = MODE === "carry" ? "累計（全期間）" : "累積（自建立起）";
       const extra =
         active.deadline && isValidISODate(active.deadline)
           ? `\n⏳ 截止：${dateOnlyTW(active.deadline)}`
           : "";
 
       await interaction.editReply(
-        `🎯 目標：「${active.name}」\n💰 目標金額：$${fmtAmount(target)}\n📈 累積：$${fmtAmount(net)}｜📊 達成率：${progress}%｜📉 距離目標：$${fmtAmount(remaining)}${extra}`
+        `🎯 目標：「${active.name}」\n` +
+        `💰 目標金額：$${fmtAmount(target)}\n` +
+        `📈 ${labelSaved}：$${fmtAmount(saved)}｜📊 達成率：${progress}%｜📉 距離目標：$${fmtAmount(remaining)}${extra}`
       );
       return;
     }
