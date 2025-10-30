@@ -1,50 +1,83 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 // src/index.ts
+// -------------------------------------------------------------
+// Discord Bot 入口：載入 Slash Commands + 專用頻道互動
+// - 指令：/ai /goal /txn (/ask 若存在)
+// - 互動：setupInteractive()（綁定頻道、10秒冷卻、摘要快取）
+// -------------------------------------------------------------
 require("dotenv/config");
 const discord_js_1 = require("discord.js");
-const fs_1 = require("fs");
-const path_1 = require("path");
-const env_1 = require("./config/env");
-const guards_1 = require("./lib/guards");
-const reply_1 = require("./lib/reply");
-(0, env_1.validateEnv)();
-const client = new discord_js_1.Client({ intents: [discord_js_1.GatewayIntentBits.Guilds] });
-const commands = new discord_js_1.Collection();
-function loadCommands() {
-    const dir = (0, path_1.join)(__dirname, 'commands');
-    const files = (0, fs_1.readdirSync)(dir).filter(f => f.endsWith('.ts') || f.endsWith('.js'));
-    for (const file of files) {
+const interactive_1 = require("./features/interactive");
+// 準備 Client（包含訊息事件所需 intents）
+const client = new discord_js_1.Client({
+    intents: [
+        discord_js_1.GatewayIntentBits.Guilds,
+        discord_js_1.GatewayIntentBits.GuildMessages, // 專用頻道互動需要
+        discord_js_1.GatewayIntentBits.MessageContent, // 讀取訊息文字
+    ],
+    partials: [discord_js_1.Partials.Channel],
+});
+client.commands = new discord_js_1.Collection();
+// ---- 載入指令（安全載入，缺檔不會炸） ----
+function safeLoadCommand(path) {
+    try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const mod = require((0, path_1.join)(dir, file));
-        const cmd = mod.default ?? mod;
-        if (cmd?.data?.name && typeof cmd.execute === 'function') {
-            commands.set(cmd.data.name, cmd);
+        const mod = require(path);
+        const cmd = mod.default || mod;
+        if (cmd?.data?.name && typeof cmd.execute === "function") {
+            client.commands.set(cmd.data.name, cmd);
+            console.log(`[cmd] loaded: ${cmd.data.name}`);
         }
     }
-    console.log(`[commands] loaded: ${commands.size}`);
+    catch (e) {
+        // 檔案可能不存在或已被你刪除，略過即可
+    }
 }
-loadCommands();
-client.once(discord_js_1.Events.ClientReady, c => {
-    console.log(`Ready as ${c.user.tag}`);
+// 依你的精簡清單載入現存指令
+safeLoadCommand("./commands/ai");
+safeLoadCommand("./commands/goal");
+safeLoadCommand("./commands/txn");
+safeLoadCommand("./commands/ask"); // 若你已加入 /ask
+// ---- Ready ----
+client.once("ready", async () => {
+    console.log(`[ready] Logged in as ${client.user?.tag}`);
 });
-client.on(discord_js_1.Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand())
-        return;
-    const cmd = commands.get(interaction.commandName);
-    if (!cmd)
-        return;
-    const uid = interaction.user.id;
-    const name = cmd.data.name;
+// ---- Slash 指令處理 ----
+client.on("interactionCreate", async (interaction) => {
     try {
-        // 輕量冷卻 + in-flight 鎖，避免重入與洗指令
-        (0, guards_1.ensureCooldown)(uid, name);
-        await (0, guards_1.withInFlight)(uid, name, async () => {
-            await cmd.execute(interaction);
-        });
+        if (!interaction.isChatInputCommand())
+            return;
+        const cmd = client.commands?.get(interaction.commandName);
+        if (!cmd) {
+            await interaction.reply({ content: "指令未找到或已移除。", ephemeral: true });
+            return;
+        }
+        await cmd.execute(interaction);
     }
     catch (err) {
-        await (0, reply_1.errorReply)(interaction, err);
+        console.error("[interaction] error:", err);
+        if (interaction.isRepliable()) {
+            try {
+                if (interaction.deferred || interaction.replied) {
+                    await interaction.editReply("❗ 發生錯誤，請稍後再試");
+                }
+                else {
+                    await interaction.reply({ content: "❗ 發生錯誤，請稍後再試", ephemeral: true });
+                }
+            }
+            catch {
+                /* ignore */
+            }
+        }
     }
 });
-client.login((0, env_1.getEnv)('DISCORD_TOKEN'));
+// ---- 專用頻道互動（你剛完成的 features/interactive.ts）----
+(0, interactive_1.setupInteractive)(client);
+// ---- Login ----
+const token = process.env.DISCORD_TOKEN;
+if (!token) {
+    console.error("❌ 缺少 DISCORD_TOKEN 環境變數");
+    process.exit(1);
+}
+client.login(token);
