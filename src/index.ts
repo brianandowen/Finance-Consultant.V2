@@ -1,9 +1,4 @@
 // src/index.ts
-// -------------------------------------------------------------
-// Discord Bot 入口：載入 Slash Commands + 專用頻道互動
-// - 指令：/ai /goal /txn (/ask 若存在)
-// - 互動：setupInteractive()（綁定頻道、10秒冷卻、摘要快取）
-// -------------------------------------------------------------
 import "dotenv/config";
 import {
   Client,
@@ -12,21 +7,19 @@ import {
   Partials,
   Interaction,
 } from "discord.js";
-import { setupInteractive } from "./features/interactive";
+import * as Interactive from "./features/interactive";
 
-// 準備 Client（包含訊息事件所需 intents）
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,   // 專用頻道互動需要
-    GatewayIntentBits.MessageContent,  // 讀取訊息文字
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel],
 }) as Client & { commands?: Collection<string, any> };
 
 client.commands = new Collection<string, any>();
 
-// ---- 載入指令（安全載入，缺檔不會炸） ----
 function safeLoadCommand(path: string) {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -36,23 +29,27 @@ function safeLoadCommand(path: string) {
       client.commands!.set(cmd.data.name, cmd);
       console.log(`[cmd] loaded: ${cmd.data.name}`);
     }
-  } catch (e) {
-    // 檔案可能不存在或已被你刪除，略過即可
-  }
+  } catch {}
 }
 
-// 依你的精簡清單載入現存指令
 safeLoadCommand("./commands/ai");
 safeLoadCommand("./commands/goal");
 safeLoadCommand("./commands/txn");
-safeLoadCommand("./commands/ask");   // 若你已加入 /ask
+safeLoadCommand("./commands/ask");
 
-// ---- Ready ----
 client.once("ready", async () => {
   console.log(`[ready] Logged in as ${client.user?.tag}`);
+  // 兼容不同匯出型態（named / default）
+  const reg =
+    (Interactive as any).registerInteractiveQnA ||
+    (Interactive as any).default?.registerInteractiveQnA;
+  if (typeof reg === "function") {
+    reg(client);
+  } else {
+    console.error("❌ registerInteractiveQnA 沒有正確匯出，請檢查 src/features/interactive.ts");
+  }
 });
 
-// ---- Slash 指令處理 ----
 client.on("interactionCreate", async (interaction: Interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
@@ -71,17 +68,11 @@ client.on("interactionCreate", async (interaction: Interaction) => {
         } else {
           await interaction.reply({ content: "❗ 發生錯誤，請稍後再試", ephemeral: true });
         }
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
   }
 });
 
-// ---- 專用頻道互動（你剛完成的 features/interactive.ts）----
-setupInteractive(client);
-
-// ---- Login ----
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
   console.error("❌ 缺少 DISCORD_TOKEN 環境變數");

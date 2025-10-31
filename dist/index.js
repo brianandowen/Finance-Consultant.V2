@@ -1,25 +1,51 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 // src/index.ts
-// -------------------------------------------------------------
-// Discord Bot 入口：載入 Slash Commands + 專用頻道互動
-// - 指令：/ai /goal /txn (/ask 若存在)
-// - 互動：setupInteractive()（綁定頻道、10秒冷卻、摘要快取）
-// -------------------------------------------------------------
 require("dotenv/config");
 const discord_js_1 = require("discord.js");
-const interactive_1 = require("./features/interactive");
-// 準備 Client（包含訊息事件所需 intents）
+const Interactive = __importStar(require("./features/interactive"));
 const client = new discord_js_1.Client({
     intents: [
         discord_js_1.GatewayIntentBits.Guilds,
-        discord_js_1.GatewayIntentBits.GuildMessages, // 專用頻道互動需要
-        discord_js_1.GatewayIntentBits.MessageContent, // 讀取訊息文字
+        discord_js_1.GatewayIntentBits.GuildMessages,
+        discord_js_1.GatewayIntentBits.MessageContent,
     ],
     partials: [discord_js_1.Partials.Channel],
 });
 client.commands = new discord_js_1.Collection();
-// ---- 載入指令（安全載入，缺檔不會炸） ----
 function safeLoadCommand(path) {
     try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -30,20 +56,24 @@ function safeLoadCommand(path) {
             console.log(`[cmd] loaded: ${cmd.data.name}`);
         }
     }
-    catch (e) {
-        // 檔案可能不存在或已被你刪除，略過即可
-    }
+    catch { }
 }
-// 依你的精簡清單載入現存指令
 safeLoadCommand("./commands/ai");
 safeLoadCommand("./commands/goal");
 safeLoadCommand("./commands/txn");
-safeLoadCommand("./commands/ask"); // 若你已加入 /ask
-// ---- Ready ----
+safeLoadCommand("./commands/ask");
 client.once("ready", async () => {
     console.log(`[ready] Logged in as ${client.user?.tag}`);
+    // 兼容不同匯出型態（named / default）
+    const reg = Interactive.registerInteractiveQnA ||
+        Interactive.default?.registerInteractiveQnA;
+    if (typeof reg === "function") {
+        reg(client);
+    }
+    else {
+        console.error("❌ registerInteractiveQnA 沒有正確匯出，請檢查 src/features/interactive.ts");
+    }
 });
-// ---- Slash 指令處理 ----
 client.on("interactionCreate", async (interaction) => {
     try {
         if (!interaction.isChatInputCommand())
@@ -66,15 +96,10 @@ client.on("interactionCreate", async (interaction) => {
                     await interaction.reply({ content: "❗ 發生錯誤，請稍後再試", ephemeral: true });
                 }
             }
-            catch {
-                /* ignore */
-            }
+            catch { }
         }
     }
 });
-// ---- 專用頻道互動（你剛完成的 features/interactive.ts）----
-(0, interactive_1.setupInteractive)(client);
-// ---- Login ----
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
     console.error("❌ 缺少 DISCORD_TOKEN 環境變數");
