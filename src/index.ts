@@ -36,6 +36,7 @@ safeLoadCommand("./commands/ai");
 safeLoadCommand("./commands/goal");
 safeLoadCommand("./commands/txn");
 safeLoadCommand("./commands/ask");
+safeLoadCommand("./commands/notify.ts");
 
 client.once("ready", async () => {
   console.log(`[ready] Logged in as ${client.user?.tag}`);
