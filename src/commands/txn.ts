@@ -11,7 +11,7 @@ import {
 } from "discord.js";
 import { query, ensureUser } from "../db";
 import { fmtAmount } from "../utils/number";
-import { formatTW, dateOnlyTW } from "../utils/time";
+import { formatTW, dateOnlyTW, deadlineTWInfo } from "../utils/time";
 import {
   INCOME_CATS,
   EXPENSE_CATS,
@@ -200,18 +200,28 @@ export default {
         const remaining = Math.max(target - saved, 0);
         const pct = target > 0 ? Number(((saved / target) * 100).toFixed(1)) : 0;
 
-        let extra = "";
-        if (goal?.deadline) {
-          const nowTW = DateTime.now().setZone("Asia/Taipei");
-          const dueEnd = DateTime.fromISO(goal.deadline, { zone: "Asia/Taipei" }).endOf("day");
-          const daysLeft = Math.max(0, Math.ceil(dueEnd.diff(nowTW, "days").days));
-          if (daysLeft > 0) {
-            const dailyNeeded = Math.ceil(remaining / daysLeft);
-            extra = `\n⏳ 截止 ${dateOnlyTW(goal.deadline)}｜日均需：$${fmtAmount(dailyNeeded)}（剩 ${daysLeft} 天）`;
-          } else {
-            extra = `\n⏳ 已到截止日（${dateOnlyTW(goal.deadline)}）`;
-          }
-        }
+let extra = "";
+if (goal?.deadline) {
+  // ✅ 統一用 time.ts 的 deadlineTWInfo 計算，避免 fromISO 解析失敗
+  const info = deadlineTWInfo(goal.deadline);
+
+  if (!info.ok) {
+    // ✅ 防呆：解析不到就不要亂顯示「已到截止日」
+    extra = `\n⚠️ 截止日格式異常：${String(goal.deadline)}`;
+  } else if (info.isExpired) {
+    extra = `\n⛔ 已到截止日（${info.dateLabel}）`;
+  } else {
+    // ✅ 未到期：計算剩餘天數與日均需要
+    // daysLeft 可能是 0（非常接近 endOfDay），此時當作「今天內」要完成
+    const daysLeft = Math.max(1, info.daysLeft ?? 1);
+    const dailyNeeded = Math.ceil(remaining / daysLeft);
+
+    extra =
+      `\n⏳ 截止 ${info.dateLabel}` +
+      `｜日均需：$${fmtAmount(dailyNeeded)}（剩 ${info.daysLeft} 天）`;
+  }
+}
+
 
         await interaction.editReply(
           `✅ 已新增 ${ttype === "income" ? "收入" : "支出"}：$${fmtAmount(amount)}｜${category}${note ? `｜備註：${note}` : ""}\n` +
